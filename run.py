@@ -15,6 +15,7 @@ from portfolio.signal_ingest import latest_signal
 from portfolio.executor import execute_trade
 from portfolio.reporter import generate_report, save_report
 from portfolio.prices import PriceFeed
+from portfolio.broker import AlpacaBroker
 
 
 def main():
@@ -22,6 +23,8 @@ def main():
     parser.add_argument("--summary", action="store_true", help="Show current state only")
     parser.add_argument("--reset", action="store_true", help="Reset portfolio to $10,000")
     parser.add_argument("--prices", action="store_true", help="Show latest prices only")
+    parser.add_argument("--alpaca", action="store_true", help="Show Alpaca account status")
+    parser.add_argument("--broker", action="store_true", help="Full broker sync: positions → portfolio")
     args = parser.parse_args()
 
     # Load or reset portfolio
@@ -39,6 +42,24 @@ def main():
         print("=" * 60)
         prices = feed.get_prices(["SPY", "QQQ", "GLD", "C:XAUUSD"])
         print(feed.summary())
+        return
+
+    # Alpaca account check
+    broker = AlpacaBroker(paper=True)
+    if args.alpaca:
+        print("=" * 60)
+        print("  ALPACA BROKER STATUS")
+        print("=" * 60)
+        print(broker.account_summary())
+        print()
+        pos = broker.positions()
+        if pos:
+            print(f"  Open positions ({len(pos)}):")
+            for p in pos:
+                print(f"    {p['symbol']:6s} {int(float(p['qty'])):>4} shares  "
+                      f"P&L: ${float(p['unrealized_pl']):>+7.2f}")
+        else:
+            print("  No open positions.")
         return
 
     pf = PortfolioState.load()
