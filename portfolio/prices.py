@@ -16,9 +16,16 @@ Usage:
 
 import json
 import os
+import ssl
 import time
 from pathlib import Path
 from urllib.request import urlopen, Request
+
+try:
+    import certifi
+    CA_BUNDLE = certifi.where()
+except ImportError:
+    CA_BUNDLE = None
 
 
 def _load_api_key() -> str | None:
@@ -51,9 +58,10 @@ class PriceFeed:
         if not self.api_key:
             return None
         url = f"{self.BASE_URL}/{ticker}/prev?adjusted=true&apiKey={self.api_key}"
+        ctx = ssl.create_default_context(cafile=CA_BUNDLE) if CA_BUNDLE else ssl.create_default_context()
         try:
             req = Request(url, headers={"User-Agent": "portfolio-manager/1.0"})
-            resp = urlopen(req, timeout=10)
+            resp = urlopen(req, timeout=10, context=ctx)
             data = json.loads(resp.read().decode())
             if data.get("status") != "OK" or not data.get("results"):
                 print(f"  No data for {ticker}: {data.get('status', 'unknown')}")

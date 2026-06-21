@@ -15,9 +15,16 @@ Usage:
 
 import json
 import os
+import ssl
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+
+try:
+    import certifi
+    CA_BUNDLE = certifi.where()
+except ImportError:
+    CA_BUNDLE = None
 
 
 # Default API endpoints
@@ -73,9 +80,10 @@ class AlpacaBroker:
     def _request(self, method: str, path: str, data: dict | None = None) -> dict:
         url = f"{self.base_url}{path}"
         body = json.dumps(data).encode() if data else None
+        ctx = ssl.create_default_context(cafile=CA_BUNDLE) if CA_BUNDLE else ssl.create_default_context()
         req = Request(url, data=body, headers=self._headers(), method=method)
         try:
-            resp = urlopen(req, timeout=15)
+            resp = urlopen(req, timeout=15, context=ctx)
             result = json.loads(resp.read().decode())
             return result if isinstance(result, dict) else {"data": result}
         except HTTPError as e:

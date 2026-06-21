@@ -61,16 +61,14 @@ def latest_signal() -> dict | None:
     # No price data in VT output — use 0, will need market data feed later
     price = 0.0
 
-    # Determine action based on validation gate and metrics
+    # Determine action based on validation gate and metrics (without price gate)
+    # Price is set to 0 by VT — run.py overrides it with live feed before acting
     validation_passed = data.get("validation_passed", False)
     action = "hold"
-    if validation_passed and price > 0 and mean_accuracy > 0.50 and avg_confidence > 0.50:
+    if validation_passed and mean_accuracy > 0.50 and avg_confidence > 0.50:
         action = "buy"
     elif not validation_passed:
         action = "hold"  # gate blocked it — don't trade
-
-    if price == 0:
-        action = "hold"  # no price data — can't trade
 
     signal = {
         "asset": "GOLD",
