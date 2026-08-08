@@ -19,6 +19,7 @@ import argparse
 import sys
 from portfolio.state import PortfolioState
 from portfolio.signal_ingest import latest_signal
+from portfolio.strategy import load_strategy, compute_signal
 from portfolio.executor import execute_trade
 from portfolio.reporter import generate_report, save_report
 from portfolio.prices import PriceFeed
@@ -55,6 +56,11 @@ def main():
     parser.add_argument("--alpaca", action="store_true", help="Show Alpaca account status")
     parser.add_argument("--broker", action="store_true", help="Sync Alpaca positions → portfolio state")
     parser.add_argument("--paper", action="store_true", help="Use internal paper executor instead of Alpaca")
+    parser.add_argument("--strategy", default=None,
+                        help="Forge strategy YAML (path or examples/ filename) — use Forge signals instead of VT")
+    parser.add_argument("--ticker", default="GLD", help="Data ticker for the Forge strategy (default GLD — must match traded asset)")
+    parser.add_argument("--interval", default="1h", help="Data interval for the Forge strategy (default 1h)")
+    parser.add_argument("--period", default="7d", help="Lookback period for the Forge strategy (default 7d)")
     args = parser.parse_args()
 
     # Load or reset portfolio
@@ -136,11 +142,21 @@ def main():
     print(f"  Equity: ${pf.equity:.2f} | Cash: ${pf.cash:.2f}")
     print()
 
-    # Get signal from VT
-    print("  [1/3] Reading VT signal...")
-    signal = latest_signal()
+    # Get signal — from a Forge strategy or the VT pipeline
+    print("  [1/3] Reading signal...")
+    signal = None
+    if args.strategy:
+        try:
+            strategy = load_strategy(args.strategy)
+            print(f"  Strategy: {strategy.name} ({args.ticker} {args.interval})")
+            signal = compute_signal(strategy, args.ticker, args.interval, args.period, ASSET)
+        except Exception as e:
+            print(f"  Forge strategy failed: {e}")
+            signal = None
+    else:
+        signal = latest_signal()
     if signal is None:
-        print("  No VT signal available. Holding current positions.")
+        print("  No signal available. Holding current positions.")
         print(generate_report(pf))
         return
 
