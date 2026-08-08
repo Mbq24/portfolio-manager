@@ -78,7 +78,7 @@ class PortfolioState:
         closed = self.wins + self.losses
         return self.wins / closed if closed > 0 else 0.0
 
-    def enter_position(self, asset: str, side: str, size: float, price: float):
+    def enter_position(self, asset: str, side: str, size: float, price: float, meta: dict | None = None):
         cost = size * price
         if cost > self.cash:
             raise ValueError(f"Not enough cash: ${self.cash:.2f} < ${cost:.2f}")
@@ -86,7 +86,7 @@ class PortfolioState:
         pos = Position(asset, side, size, price)
         self.positions.append(pos)
         self.total_trades += 1
-        self.trade_log.append({
+        entry = {
             "time": datetime.now(timezone.utc).isoformat(),
             "type": "enter",
             "asset": asset,
@@ -94,15 +94,18 @@ class PortfolioState:
             "size": size,
             "price": price,
             "cost": round(cost, 2),
-        })
+        }
+        if meta:
+            entry.update(meta)
+        self.trade_log.append(entry)
 
-    def exit_position(self, asset: str, price: float):
+    def exit_position(self, asset: str, price: float, meta: dict | None = None):
         for i, pos in enumerate(self.positions):
             if pos.asset == asset:
                 proceeds = pos.size * price
                 pnl = proceeds - (pos.size * pos.entry_price)
                 self.cash += proceeds
-                self.trade_log.append({
+                exit_entry = {
                     "time": datetime.now(timezone.utc).isoformat(),
                     "type": "exit",
                     "asset": asset,
@@ -111,7 +114,10 @@ class PortfolioState:
                     "entry_price": pos.entry_price,
                     "exit_price": price,
                     "pnl": round(pnl, 2),
-                })
+                }
+                if meta:
+                    exit_entry.update(meta)
+                self.trade_log.append(exit_entry)
                 if pnl > 0:
                     self.wins += 1
                 else:

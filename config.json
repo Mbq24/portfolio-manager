@@ -1,0 +1,10 @@
+{
+  "strategy": "volatility-squeeze.yaml",
+  "ticker": "GLD",
+  "interval": "1h",
+  "period": "7d",
+  "asset": "GLD",
+  "mode": "paper",
+  "forge_push": true,
+  "forge_url": "https://forge-production-0c60.up.railway.app"
+}
