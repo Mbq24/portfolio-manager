@@ -23,6 +23,11 @@ DEFAULTS = {
     "period": "7d",
     # Asset symbol traded through the broker (GLD ETF on Alpaca)
     "asset": "GLD",
+    # Position sizing: % of equity exposed per trade (notional). 1.0 = 1%.
+    # This strategy has NO stop loss (signal-based exits), so this is an
+    # exposure cap, not a stop-risk number. 2.0 is still conservative for
+    # paper; 3.0+ only once the harness shows real edge on 100+ trades.
+    "risk_pct": 1.0,
     # "paper" uses the internal executor; anything else goes through the broker
     "mode": "paper",
     # Push state snapshot to Forge so the control-room visual stays in sync

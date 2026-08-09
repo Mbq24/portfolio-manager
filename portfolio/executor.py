@@ -38,7 +38,7 @@ def calculate_commission(size: float) -> float:
 
 
 def execute_trade(action: str, price: float, size: Optional[float] = None,
-                  cash: float = 10_000.0) -> dict:
+                  cash: float = 10_000.0, risk_pct: float = 1.0) -> dict:
     """Simulate a paper trade and return execution details.
 
     Returns dict with:
@@ -53,9 +53,9 @@ def execute_trade(action: str, price: float, size: Optional[float] = None,
     fill_price = calculate_entry_price(price, side)
     commission = calculate_commission(size or 0)
 
-    # Default size: 1% of cash at current price
+    # Default size: risk_pct% of cash at current price (notional exposure)
     if size is None:
-        risk_per_trade = cash * 0.01
+        risk_per_trade = cash * risk_pct / 100.0
         size = risk_per_trade / fill_price
 
     cost = size * fill_price + commission

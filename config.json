@@ -6,5 +6,6 @@
   "asset": "BTCUSD",
   "mode": "paper",
   "forge_push": true,
-  "forge_url": "https://forge-production-0c60.up.railway.app"
+  "forge_url": "https://forge-production-0c60.up.railway.app",
+  "risk_pct": 2.0
 }

@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--interval", default=None, help="Override data interval")
     parser.add_argument("--period", default=None, help="Override lookback period")
     parser.add_argument("--asset", default=None, help="Override traded asset symbol")
+    parser.add_argument("--risk-pct", type=float, default=None, help="Override position size % (e.g. 2.0 = 2% exposure per trade)")
     args = parser.parse_args()
 
     # Apply CLI overrides on top of config
@@ -88,6 +89,8 @@ def main():
         val = getattr(args, key)
         if val:
             cfg[key] = val
+    if args.risk_pct is not None:
+        cfg["risk_pct"] = args.risk_pct
     if args.paper:
         cfg["mode"] = "paper"
 
@@ -235,7 +238,8 @@ def main():
             print(f"  Already in {ASSET} position. Holding.")
         elif cfg["mode"] == "paper":
             # Paper execution (fallback / testing)
-            execution = execute_trade("buy", signal["price"], cash=pf.cash)
+            execution = execute_trade("buy", signal["price"], cash=pf.cash,
+                                      risk_pct=float(cfg.get("risk_pct", 1.0)))
             pf.enter_position(ASSET, execution["side"], execution["size"],
                               execution["fill_price"], meta=meta)
             print(f"  [PAPER] ENTERED {ASSET} {execution['side']} "
@@ -243,7 +247,8 @@ def main():
                   f"(cost ${execution['cost']:.2f})")
         else:
             # Alpaca execution
-            order, err = alpaca_buy(broker, signal["price"], pf.cash, ASSET)
+            order, err = alpaca_buy(broker, signal["price"], pf.cash, ASSET,
+                                    risk_pct=float(cfg.get("risk_pct", 1.0)))
             if err:
                 print(f"  Alpaca order failed: {err}")
                 print("  No trade placed. Use --paper to test with paper executor.")
@@ -289,14 +294,14 @@ def main():
     print(report)
 
 
-def alpaca_buy(broker, price, cash, asset):
+def alpaca_buy(broker, price, cash, asset, risk_pct=1.0):
     """Place a buy order through Alpaca. Returns (order, error).
 
     Uses a notional (dollar-amount) order so high-priced assets like BTC
     size exactly — a whole-share qty would round $100 risk up to 1 BTC
     (~$65k) and blow the account.
     """
-    risk_amount = round(cash * 0.01, 2)  # 1% of cash per trade
+    risk_amount = round(cash * risk_pct / 100.0, 2)  # risk_pct% of cash
     print(f"  Alpaca: buying ${risk_amount:.2f} of {asset} @ market (${price:.2f})")
     order = broker.market_order(asset, side="buy", notional=risk_amount)
     if "error" in order:
