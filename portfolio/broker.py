@@ -128,29 +128,35 @@ class AlpacaBroker:
             return None
         return result
 
-    def market_order(self, symbol: str, qty: float, side: str,
-                     time_in_force: str = "day") -> dict:
+    def market_order(self, symbol: str, qty: float | None = None, side: str = "buy",
+                     notional: float | None = None, time_in_force: str = "day") -> dict:
         """Place a market order.
 
         Args:
-            symbol: Ticker (e.g. 'SPY', 'GLD')
-            qty: Number of shares
+            symbol: Ticker (e.g. 'SPY', 'GLD', 'BTCUSD')
+            qty: Number of shares/coins (whole or fractional)
             side: 'buy' or 'sell'
+            notional: Dollar amount to trade (crypto & some stocks) — use
+                      instead of qty for high-priced assets so position sizing
+                      is exact and never rounds to a whole unit.
             time_in_force: 'day', 'gtc', 'ioc', 'fok'
         Returns:
             Order result dict
         """
         order = {
             "symbol": symbol,
-            "qty": str(qty),
             "side": side,
             "type": "market",
             "time_in_force": time_in_force,
         }
+        if notional is not None:
+            order["notional"] = str(notional)
+        else:
+            order["qty"] = str(qty)
         result = self._request("POST", "/v2/orders", order)
         if "id" in result:
-            print(f"  Order placed: {side.upper()} {qty} {symbol} @ market "
-                  f"(id: {result['id'][:8]}...)")
+            print(f"  Order placed: {side.upper()} {symbol} @ market "
+                  f"({notional if notional is not None else qty}, id: {result['id'][:8]}...)")
         return result
 
     def close_position(self, symbol: str) -> dict:

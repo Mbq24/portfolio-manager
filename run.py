@@ -164,10 +164,12 @@ def main():
     print("=" * 60)
     print(describe_config(cfg))
 
-    # Fetch current prices first
+    # Fetch current prices first — the FEED uses the yfinance ticker
+    # (cfg["ticker"], e.g. BTC-USD). cfg["asset"] (e.g. BTCUSD) is the
+    # Alpaca broker symbol and is NOT a valid yfinance ticker.
     print()
     print("  Current prices:")
-    prices = feed.get_prices(["SPY", ASSET, "C:XAUUSD"])
+    prices = feed.get_prices(["SPY", cfg["ticker"]])
     print(feed.summary())
     print()
 
@@ -201,13 +203,12 @@ def main():
         print(generate_report(pf))
         return
 
-    # Use live price from feed — ASSET ETF for Alpaca orders, gold spot for context
-    asset_price = prices.get(ASSET, 0)
-    gold_spot = prices.get("C:XAUUSD", 0)
+    # Use live price from feed — keyed by the yfinance ticker. The strategy's
+    # own computed price (same ticker) is already correct; the feed value is
+    # just the freshest close, applied when available.
+    asset_price = prices.get(cfg["ticker"], 0)
     if asset_price > 0:
-        signal["price"] = asset_price  # use traded ETF for position sizing
-    elif gold_spot > 0:
-        signal["price"] = gold_spot  # fall back to spot
+        signal["price"] = asset_price
 
     print(f"  Signal: {signal['action']} | Confidence: {signal['confidence']:.1%} | Price: ${signal['price']:.2f}")
     print()
@@ -285,11 +286,15 @@ def main():
 
 
 def alpaca_buy(broker, price, cash, asset):
-    """Place a buy order through Alpaca. Returns (order, error)."""
-    risk_amount = cash * 0.01  # 1% of cash per trade
-    qty = max(1, int(risk_amount / price))  # whole shares only
-    print(f"  Alpaca: buying {qty} {asset} @ market (${price:.2f})")
-    order = broker.market_order(asset, qty, "buy")
+    """Place a buy order through Alpaca. Returns (order, error).
+
+    Uses a notional (dollar-amount) order so high-priced assets like BTC
+    size exactly — a whole-share qty would round $100 risk up to 1 BTC
+    (~$65k) and blow the account.
+    """
+    risk_amount = round(cash * 0.01, 2)  # 1% of cash per trade
+    print(f"  Alpaca: buying ${risk_amount:.2f} of {asset} @ market (${price:.2f})")
+    order = broker.market_order(asset, side="buy", notional=risk_amount)
     if "error" in order:
         return None, order["error"]
     return order, None
