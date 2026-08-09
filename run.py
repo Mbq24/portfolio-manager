@@ -30,7 +30,7 @@ from portfolio.executor import execute_trade
 from portfolio.reporter import generate_report, save_report
 from portfolio.prices import PriceFeed
 from portfolio.broker import AlpacaBroker
-from portfolio.config import load as load_config, describe as describe_config
+from portfolio.config import load as load_config, describe as describe_config, sync_from_forge
 from portfolio.journal import append as journal_append, read_trades, read_equity
 
 
@@ -63,6 +63,10 @@ def push_to_forge(cfg: dict, pf: PortfolioState, strategy_name: str, source: str
 
 def main():
     cfg = load_config()
+
+    # Forge is the control room: pull the desired config from Forge first.
+    # Edits made in the Forge UI are applied here, this cycle.
+    cfg = sync_from_forge(cfg)
 
     parser = argparse.ArgumentParser(description="Portfolio Manager")
     parser.add_argument("--summary", action="store_true", help="Show current state only")

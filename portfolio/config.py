@@ -61,6 +61,45 @@ def describe(cfg: dict) -> str:
     )
 
 
+def sync_from_forge(cfg: dict) -> dict:
+    """Pull the desired config from Forge and apply it locally.
+
+    Forge is the control room: edits made in the web UI land in
+    Forge's /api/portfolio/config, and the next portfolio-manager cycle
+    pulls them here, persists them to config.json (so the local file
+    always reflects what will run), and returns the merged config.
+
+    Returns the merged config. On any failure, returns the local config
+    unchanged (running the last-known-good config is safer than stopping).
+    """
+    if not cfg.get("forge_push"):
+        return cfg
+
+    import json as _json
+    import urllib.request
+
+    url = cfg["forge_url"].rstrip("/") + "/api/portfolio/config"
+    try:
+        req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode())
+        remote = data.get("config") or {}
+        if not remote:
+            return cfg
+
+        merged = dict(DEFAULTS)
+        merged.update(cfg)      # local file wins for non-remote keys
+        merged.update(remote)   # remote (Forge) wins for strategy/ticker/etc.
+        save(merged)
+        print(f"  [config] Applied remote config from Forge: "
+              f"{remote.get('strategy', '?')} / {remote.get('ticker', '?')} "
+              f"{remote.get('interval', '?')} ({remote.get('mode', '?')})")
+        return merged
+    except Exception as e:
+        print(f"  [config] Forge config sync failed ({e}) — using local config")
+        return cfg
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--show":
