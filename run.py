@@ -196,7 +196,20 @@ def main():
             strategy_name = strategy.name
             source = f"forge:{strategy.name}"
             print(f"  Strategy: {strategy.name} ({cfg['ticker']} {cfg['interval']})")
-            signal = compute_signal(strategy, cfg["ticker"], cfg["interval"], cfg["period"], ASSET)
+            # If a position is open, pass its entry time so the exit signal
+            # is checked across ALL bars since entry — a transient exit that
+            # already fired must close the position (yfinance data lags; the
+            # old code only looked at the latest bar and could hold through
+            # an exit that happened hours ago).
+            in_position = any(p.asset == ASSET for p in pf.positions)
+            entry_time = ""
+            if in_position:
+                pos = next(p for p in pf.positions if p.asset == ASSET)
+                entry_time = pos.entry_time
+            exit_lookback = int(cfg.get("exit_lookback_bars", 6)) if in_position else 0
+            signal = compute_signal(strategy, cfg["ticker"], cfg["interval"], cfg["period"],
+                                    ASSET, exit_lookback_bars=exit_lookback,
+                                    entry_time=entry_time)
         except Exception as e:
             print(f"  Forge strategy failed: {e}")
             signal = None

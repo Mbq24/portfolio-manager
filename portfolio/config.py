@@ -28,6 +28,10 @@ DEFAULTS = {
     # exposure cap, not a stop-risk number. 2.0 is still conservative for
     # paper; 3.0+ only once the harness shows real edge on 100+ trades.
     "risk_pct": 1.0,
+    # When a position is open, check the exit signal across this many recent
+    # bars so a transient exit isn't missed (yfinance data lags; the signal
+    # may have fired mid-window and relaxed by the time we poll).
+    "exit_lookback_bars": 6,
     # "paper" uses the internal executor; anything else goes through the broker
     "mode": "paper",
     # Push state snapshot to Forge so the control-room visual stays in sync

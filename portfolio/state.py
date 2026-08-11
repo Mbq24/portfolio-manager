@@ -24,11 +24,13 @@ class Position:
     current_price: float
     unrealized_pnl: float
 
-    def __init__(self, asset: str, side: str, size: float, entry_price: float):
+    def __init__(self, asset: str, side: str, size: float, entry_price: float,
+                 ticker: str = ""):
         self.asset = asset
-        self.side = side
+        self.side = side  # "long" or "short"
         self.size = size
         self.entry_price = entry_price
+        self.ticker = ticker  # yfinance symbol (e.g. BTC-USD) for price marking
         self.entry_time = datetime.now(timezone.utc).isoformat()
         self.current_price = entry_price
         self.unrealized_pnl = 0.0
@@ -39,6 +41,7 @@ class Position:
             "side": self.side,
             "size": self.size,
             "entry_price": self.entry_price,
+            "ticker": self.ticker,
             "entry_time": self.entry_time,
             "current_price": self.current_price,
             "unrealized_pnl": round(self.unrealized_pnl, 2),
@@ -46,7 +49,8 @@ class Position:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Position":
-        pos = cls(d["asset"], d["side"], d["size"], d["entry_price"])
+        pos = cls(d["asset"], d["side"], d["size"], d["entry_price"],
+                  ticker=d.get("ticker", ""))
         pos.entry_time = d["entry_time"]
         pos.current_price = d["current_price"]
         pos.unrealized_pnl = d["unrealized_pnl"]
@@ -83,7 +87,7 @@ class PortfolioState:
         if cost > self.cash:
             raise ValueError(f"Not enough cash: ${self.cash:.2f} < ${cost:.2f}")
         self.cash -= cost
-        pos = Position(asset, side, size, price)
+        pos = Position(asset, side, size, price, ticker=(meta or {}).get("ticker", ""))
         self.positions.append(pos)
         self.total_trades += 1
         entry = {
@@ -128,10 +132,17 @@ class PortfolioState:
         raise ValueError(f"No open position for {asset}")
 
     def mark_prices(self, prices: dict[str, float]):
-        """Update current prices for unrealized P&L."""
+        """Update current prices for unrealized P&L.
+
+        Positions carry both `asset` (broker symbol, e.g. BTCUSD) and, when
+        stamped at entry, `ticker` (yfinance symbol, e.g. BTC-USD). The price
+        feed is keyed by the yfinance ticker, so match on ticker first, then
+        fall back to asset (for older positions without the stamp).
+        """
         for pos in self.positions:
-            if pos.asset in prices:
-                pos.current_price = prices[pos.asset]
+            key = getattr(pos, "ticker", None) or pos.asset
+            if key in prices:
+                pos.current_price = prices[key]
                 pos.unrealized_pnl = round(
                     (pos.current_price - pos.entry_price) * pos.size, 2
                 )

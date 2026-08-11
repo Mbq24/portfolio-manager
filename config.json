@@ -2,10 +2,11 @@
   "strategy": "volatility-squeeze.yaml",
   "ticker": "BTC-USD",
   "interval": "1h",
-  "period": "7d",
+  "period": "1mo",
   "asset": "BTCUSD",
+  "risk_pct": 2.0,
+  "exit_lookback_bars": 6,
   "mode": "paper",
   "forge_push": true,
-  "forge_url": "https://forge-production-0c60.up.railway.app",
-  "risk_pct": 2.0
+  "forge_url": "https://forge-production-0c60.up.railway.app"
 }

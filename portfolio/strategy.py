@@ -24,6 +24,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 FORGE_ROOT = (
     Path.home()
     / "Library"
@@ -99,11 +101,19 @@ def compute_signal(
     interval: str = "1h",
     period: str = "7d",
     asset: str = "GLD",
+    exit_lookback_bars: int = 0,
+    entry_time: str = "",
 ) -> dict | None:
     """Compute the strategy on the latest data and return a trade signal.
 
-    Acts on the LAST CLOSED BAR only — that's the honest live semantics
-    (no peeking at the forming bar, same as what the harness backtest does).
+    Entry acts on the LAST CLOSED BAR only — honest live semantics (no
+    peeking at the forming bar, same as the backtest).
+
+    Exit checks the last `exit_lookback_bars` closed bars (default 0 = only
+    the latest bar). A transient exit condition that fired mid-window but has
+    since relaxed should still close the position — the old behavior only
+    looked at the final bar and could hold through an exit that already
+    happened (the Aug-10 case: spread > 0.005 for 4 hours, never exited).
 
     Returns None if data can't be fetched or the strategy has no signals.
     """
@@ -124,13 +134,36 @@ def compute_signal(
     price = float(last["close"])
     ts = datetime.now(timezone.utc).isoformat()
 
-    # Exit takes precedence over entry (safety first)
+    # Exit takes precedence over entry (safety first).
+    # If we know when the position was entered, check whether the exit
+    # condition has fired on ANY bar since entry — a transient exit that
+    # already happened must close the position (the Aug-10 case: spread >
+    # 0.005 for 4 hours, never exited because only the latest bar was
+    # checked). Fall back to a fixed lookback window when entry_time is
+    # unknown.
     action = "hold"
     confidence = 0.5
-    if "signal_exit" in result.columns and bool(last["signal_exit"]):
-        action = "sell"
-        confidence = 0.9
-    elif "signal_entry" in result.columns and bool(last["signal_entry"]):
+    has_exit_col = "signal_exit" in result.columns
+    has_entry_col = "signal_entry" in result.columns
+    if has_exit_col:
+        if entry_time:
+            try:
+                t0 = pd.Timestamp(entry_time)
+                since_entry = result.index >= t0
+                if bool(result.loc[since_entry, "signal_exit"].fillna(0).astype(bool).any()):
+                    action = "sell"
+                    confidence = 0.9
+            except Exception:
+                window = result["signal_exit"].tail(max(exit_lookback_bars, 1))
+                if bool(window.fillna(0).astype(bool).any()):
+                    action = "sell"
+                    confidence = 0.9
+        else:
+            window = result["signal_exit"].tail(max(exit_lookback_bars, 1))
+            if bool(window.fillna(0).astype(bool).any()):
+                action = "sell"
+                confidence = 0.9
+    if action != "sell" and has_entry_col and bool(last["signal_entry"]):
         action = "buy"
         confidence = 0.8
 
