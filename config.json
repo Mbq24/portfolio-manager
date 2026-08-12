@@ -2,7 +2,7 @@
   "strategy": "volatility-squeeze.yaml",
   "ticker": "BTC-USD",
   "interval": "1h",
-  "period": "1mo",
+  "period": "7d",
   "asset": "BTCUSD",
   "risk_pct": 2.0,
   "exit_lookback_bars": 6,
