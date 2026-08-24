@@ -14,18 +14,21 @@ Usage:
     prices = feed.get_prices(["SPY", "GLD", "QQQ"])
 """
 
+import os
 import sys
 import time
 from pathlib import Path
 
-FORGE_ROOT = (
+# Forge code lives at the iCloud path on the dev Mac, or at FORGE_ROOT in the
+# deployed container (Docker image bundles the needed Forge modules there).
+FORGE_ROOT = Path(os.environ.get("FORGE_ROOT", str(
     Path.home()
     / "Library"
     / "Mobile Documents"
     / "com~apple~CloudDocs"
     / "VisualStudioProjects"
     / "Forge"
-)
+)))
 if str(FORGE_ROOT) not in sys.path:
     sys.path.insert(0, str(FORGE_ROOT))
 

@@ -1,0 +1,7 @@
+# portfolio-manager — runtime deps (pin to Forge .venv parity)
+pandas==2.3.3
+numpy==2.2.6
+yfinance
+pyyaml
+flask
+requests

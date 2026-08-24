@@ -20,20 +20,23 @@ logic:
     }
 """
 
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
-FORGE_ROOT = (
+# Forge code lives at the iCloud path on the dev Mac, or at FORGE_ROOT in the
+# deployed container (Docker image bundles the needed Forge modules there).
+FORGE_ROOT = Path(os.environ.get("FORGE_ROOT", str(
     Path.home()
     / "Library"
     / "Mobile Documents"
     / "com~apple~CloudDocs"
     / "VisualStudioProjects"
     / "Forge"
-)
+)))
 if str(FORGE_ROOT) not in sys.path:
     sys.path.insert(0, str(FORGE_ROOT))
 
