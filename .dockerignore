@@ -1,0 +1,8 @@
+# Build context exclusions — keeps the upload small and vendor/ included
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+data/
+diag_vol_expansion.py
