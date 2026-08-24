@@ -117,7 +117,7 @@ def compute_signal(
 
     Returns None if data can't be fetched or the strategy has no signals.
     """
-    df = fetch_ohlcv(ticker, interval=interval, period=period)
+    df = fetch_ohlcv(ticker, interval=interval, period=period, allow_synthetic=False)
     if df is None or df.empty or len(df) < 20:
         print(f"  [strategy] Not enough data for {ticker} ({0 if df is None else len(df)} bars)")
         return None

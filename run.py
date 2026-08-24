@@ -279,21 +279,36 @@ def main():
     elif signal["action"] == "sell":
         if not any(p.asset == ASSET for p in pf.positions):
             print(f"  No {ASSET} position to exit.")
-        elif cfg["mode"] == "paper":
-            # Paper exit
-            pnl = pf.exit_position(ASSET, signal["price"], meta=meta)
-            tag = "PROFIT" if pnl > 0 else "LOSS"
-            print(f"  [PAPER] EXITED {ASSET} → {tag} ${abs(pnl):.2f}")
         else:
-            # Alpaca exit
-            result, err = alpaca_sell(broker, ASSET)
-            if err:
-                print(f"  Alpaca close failed: {err}")
-            else:
-                exit_price = signal["price"]
-                pnl = pf.exit_position(ASSET, exit_price, meta=meta)
+            pos = next(p for p in pf.positions if p.asset == ASSET)
+            # Sanity guard: refuse to exit at a price absurdly far from the
+            # entry. A >30% move in one cycle is not a real market move — it
+            # means the price feed is contaminated (synthetic fallback, bad
+            # ticker, stale data). Exit on garbage prices books fake P&L
+            # (Aug 23 2026: exited at synthetic $50,955 vs real $77,345 entry,
+            # fabricating a -$102.92 loss).
+            if pos.entry_price > 0:
+                deviation = abs(signal["price"] - pos.entry_price) / pos.entry_price
+                if deviation > 0.30:
+                    print(f"  ⚠ SANITY GUARD: signal price ${signal['price']:.2f} is "
+                          f"{deviation:.1%} from entry ${pos.entry_price:.2f} — refusing exit "
+                          f"(contaminated price feed?). Holding.")
+                    signal["action"] = "hold"
+            if signal["action"] == "sell" and cfg["mode"] == "paper":
+                # Paper exit
+                pnl = pf.exit_position(ASSET, signal["price"], meta=meta)
                 tag = "PROFIT" if pnl > 0 else "LOSS"
-                print(f"  [ALPACA] EXITED {ASSET} → {tag} ${abs(pnl):.2f}")
+                print(f"  [PAPER] EXITED {ASSET} → {tag} ${abs(pnl):.2f}")
+            elif signal["action"] == "sell":
+                # Alpaca exit
+                result, err = alpaca_sell(broker, ASSET)
+                if err:
+                    print(f"  Alpaca close failed: {err}")
+                else:
+                    exit_price = signal["price"]
+                    pnl = pf.exit_position(ASSET, exit_price, meta=meta)
+                    tag = "PROFIT" if pnl > 0 else "LOSS"
+                    print(f"  [ALPACA] EXITED {ASSET} → {tag} ${abs(pnl):.2f}")
     print()
 
     # Step 3: Report + audit trail + Forge sync

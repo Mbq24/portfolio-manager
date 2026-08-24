@@ -41,9 +41,14 @@ class PriceFeed:
         self._cache_ttl: int = 60  # 1 minute cache (yfinance is REST)
 
     def _fetch(self, ticker: str) -> dict | None:
-        """Fetch latest daily OHLCV for a ticker."""
+        """Fetch latest daily OHLCV for a ticker.
+
+        Never falls back to synthetic data — a failed fetch returns None so
+        the caller knows there is no real price (trading on synthetic prices
+        fabricated a -$102.92 exit on Aug 23 2026 when DNS was down).
+        """
         try:
-            df = fetch_ohlcv(ticker, interval="1d", period="5d")
+            df = fetch_ohlcv(ticker, interval="1d", period="5d", allow_synthetic=False)
             if df is None or df.empty:
                 print(f"  No data for {ticker}")
                 return None
