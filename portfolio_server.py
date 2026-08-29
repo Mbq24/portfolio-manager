@@ -8,7 +8,7 @@ so the Hermes gateway / Slack bot / Forge control room can read it without a
 local machine.
 
 Endpoints:
-    GET /health                    liveness probe
+    GET /health                    liveness probe + scheduler heartbeat
     GET /api/portfolio/state       full state + config + recent trades
     GET /api/portfolio/config      effective config
     POST /api/portfolio/cycle      trigger a cycle now (optional token)
@@ -16,6 +16,17 @@ Endpoints:
 The cycle itself is run.py — the SAME code the launchd hook ran locally. The
 server just schedules it and serves the results. State/journal persist under
 the data/ dir, which must be a mounted volume so redeploys don't lose history.
+
+v2 fixes (Aug 2026):
+  - _next_run_delay() used (hour+1)%24 rollover which produced a NEGATIVE
+    delay at 23:05 ("00:05 today" is in the past) -> time.sleep() raised
+    ValueError -> scheduler thread died silently on night one and never
+    restarted; the HTTP server kept answering 200s while the trading loop
+    was dead. Now uses timedelta(hours=1) (date-safe) and clamps delay >= 0.
+  - Scheduler loop body wrapped in try/except with logging so a single bad
+    cycle can never kill the thread again.
+  - /health now reports last_cycle_at so liveness of the LOOP (not just the
+    web server) is observable from outside.
 """
 
 import os
@@ -23,7 +34,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -35,6 +46,12 @@ CYCLE_MINUTE = int(os.environ.get("PM_CYCLE_MINUTE", "5"))  # run at :05 past th
 CYCLE_TOKEN = os.environ.get("PM_CYCLE_TOKEN", "")  # optional guard for manual trigger
 
 app = Flask(__name__)
+
+# Scheduler heartbeat state
+_lock = threading.Lock()
+_last_cycle_at = None
+_last_cycle_ok = None
+_cycle_count = 0
 
 
 def _run_cycle() -> str:
@@ -66,41 +83,77 @@ def _log(msg: str):
 
 
 def _next_run_delay() -> float:
-    """Seconds until the next scheduled cycle (minute CYCLE_MINUTE each hour)."""
+    """Seconds until the next scheduled cycle (minute CYCLE_MINUTE each hour).
+
+    Uses timedelta for the rollover so day boundaries are handled correctly:
+    at 23:05 the next run is 00:05 TOMORROW, never "00:05 today" (which is in
+    the past and produced a negative delay that crashed the scheduler).
+    """
     now = datetime.now()
     target = now.replace(minute=CYCLE_MINUTE, second=0, microsecond=0)
     if target <= now:
-        target = target.replace(hour=(target.hour + 1) % 24)
-    return (target - now).total_seconds()
+        target += timedelta(hours=1)
+    return max((target - now).total_seconds(), 0.0)
 
 
 def scheduler_loop():
     """Background thread: run a cycle at startup, then on schedule."""
+    global _last_cycle_at, _last_cycle_ok, _cycle_count
     _log(f"Scheduler started (interval={CYCLE_INTERVAL_S}s, minute={CYCLE_MINUTE})")
     # Run once at boot so the service is immediately useful after a redeploy.
     time.sleep(5)
     _log("Boot cycle start")
     try:
         out = _run_cycle()
+        with _lock:
+            _last_cycle_at = datetime.now(timezone.utc).isoformat()
+            _last_cycle_ok = True
+            _cycle_count += 1
         _log(f"Boot cycle done ({len(out)} chars)")
     except Exception as e:
+        with _lock:
+            _last_cycle_at = datetime.now(timezone.utc).isoformat()
+            _last_cycle_ok = False
+            _cycle_count += 1
         _log(f"Boot cycle FAILED: {e}")
 
     while True:
-        delay = _next_run_delay()
-        _log(f"Next cycle in {delay/60:.1f} min")
-        time.sleep(delay)
-        _log("Scheduled cycle start")
         try:
+            delay = _next_run_delay()
+            _log(f"Next cycle in {delay/60:.1f} min")
+            time.sleep(delay)
+            _log("Scheduled cycle start")
             out = _run_cycle()
+            with _lock:
+                _last_cycle_at = datetime.now(timezone.utc).isoformat()
+                _last_cycle_ok = True
+                _cycle_count += 1
             _log(f"Scheduled cycle done ({len(out)} chars)")
         except Exception as e:
-            _log(f"Scheduled cycle FAILED: {e}")
+            # Never let a single failure kill the loop — log, record, continue.
+            with _lock:
+                _last_cycle_at = datetime.now(timezone.utc).isoformat()
+                _last_cycle_ok = False
+                _cycle_count += 1
+            _log(f"Scheduled cycle FAILED: {e} — continuing")
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
+    with _lock:
+        last = _last_cycle_at
+        ok = _last_cycle_ok
+        count = _cycle_count
+    return jsonify({
+        "status": "ok",
+        "time": datetime.now(timezone.utc).isoformat(),
+        "scheduler": {
+            "last_cycle_at": last,
+            "last_cycle_ok": ok,
+            "cycle_count": count,
+            "next_cycle_in_min": round(_next_run_delay() / 60, 1),
+        },
+    })
 
 
 @app.route("/api/portfolio/state")
@@ -136,8 +189,20 @@ def trigger_cycle():
         token = request.headers.get("X-Cycle-Token", "")
         if token != CYCLE_TOKEN:
             return jsonify({"error": "bad token"}), 401
-    thread = threading.Thread(target=lambda: _log(_run_cycle()[:500]), daemon=True)
-    thread.start()
+
+    def _trigger():
+        try:
+            out = _run_cycle()
+            with _lock:
+                global _last_cycle_at, _last_cycle_ok, _cycle_count
+                _last_cycle_at = datetime.now(timezone.utc).isoformat()
+                _last_cycle_ok = True
+                _cycle_count += 1
+            _log(f"Manual cycle done ({len(out)} chars)")
+        except Exception as e:
+            _log(f"Manual cycle FAILED: {e}")
+
+    threading.Thread(target=_trigger, daemon=True).start()
     return jsonify({"status": "cycle started"})
 
 
