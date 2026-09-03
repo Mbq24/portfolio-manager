@@ -22,7 +22,7 @@ logic:
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -85,6 +85,41 @@ def load_strategy(yaml_path: str | Path) -> IndicatorDSL:
     )
 
 
+_INTERVAL_MINUTES = {
+    "1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30,
+    "60m": 60, "1h": 60, "90m": 90,
+    "1d": 1440, "5d": 7200, "1wk": 10080, "1w": 10080,
+}
+
+
+def _drop_forming_bar(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Drop the still-forming (incomplete) last bar, if present.
+
+    yfinance returns the CURRENT in-progress period as the final row, with its
+    "close" equal to the live price at fetch time. Treating that partial candle
+    as a settled close lets intra-hour noise trigger trades the completed bar
+    would not have produced (Sep 3 2026: Aug-31 12:05 UTC entry fired on the
+    forming 12:00 bar, which closed ~$575 lower an hour later). Signals must be
+    computed on closed bars only — same semantics as the backtest/harness.
+
+    Bars are indexed by period START; a bar is closed when start + interval
+    <= now. We keep rows whose start is no later than (now - interval).
+    """
+    freq_min = _INTERVAL_MINUTES.get(interval)
+    if freq_min is None:
+        return df
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=freq_min)
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    closed = df.loc[idx <= cutoff]
+    # Clock-skew / data-lag guard: never gut the frame. If the drop removed
+    # nothing or would leave too few bars, keep the original data.
+    if len(closed) == len(df) or len(closed) < 20:
+        return df
+    return closed
+
+
 def _label_regime(df) -> str:
     """Mirror the harness regime heuristic so live labels match lab labels."""
     c = df["close"]
@@ -124,6 +159,11 @@ def compute_signal(
     if df is None or df.empty or len(df) < 20:
         print(f"  [strategy] Not enough data for {ticker} ({0 if df is None else len(df)} bars)")
         return None
+
+    # yfinance returns the still-forming bar as the last row; its "close" is
+    # the live price. Drop it so signals are computed on completed candles
+    # only (the behavior this function's docstring already promises).
+    df = _drop_forming_bar(df, interval)
 
     result = compute_indicators(df, dsl)
 
