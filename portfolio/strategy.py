@@ -190,15 +190,32 @@ def compute_signal(
     has_entry_col = "signal_entry" in result.columns
     if has_exit_col:
         if entry_time:
+            # Only bars at/after the entry may close the position.
+            #
+            # Bug found 2026-09-19 on the first live 3of4 entry: daily indexes are
+            # tz-NAIVE while entry_time is tz-AWARE, so `index >= t0` raised
+            # TypeError and the bare `except` below silently fell back to a fixed
+            # 6-bar lookback — which reaches back BEFORE the entry. The position
+            # opened at 81,479.99 and was closed 27 seconds later at 81,473.08 by
+            # an exit signal from a bar that closed six days earlier. Normalise
+            # both sides to UTC-aware, and never exit on pre-entry bars.
             try:
+                idx = pd.DatetimeIndex(result.index)
+                idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
                 t0 = pd.Timestamp(entry_time)
-                since_entry = result.index >= t0
-                if bool(result.loc[since_entry, "signal_exit"].fillna(0).astype(bool).any()):
+                t0 = t0.tz_localize("UTC") if t0.tzinfo is None else t0.tz_convert("UTC")
+                since_entry = pd.Series(idx >= t0, index=result.index)
+                if bool(since_entry.any()) and bool(
+                        result.loc[since_entry, "signal_exit"].fillna(0).astype(bool).any()):
                     action = "sell"
                     confidence = 0.9
-            except Exception:
-                window = result["signal_exit"].tail(max(exit_lookback_bars, 1))
-                if bool(window.fillna(0).astype(bool).any()):
+            except Exception as e:
+                # A malformed entry_time must not resurrect the stale-signal bug,
+                # but we still want to honour a freshly-fired exit: check only the
+                # latest closed bar rather than the whole lookback window.
+                print(f"  [strategy] entry_time unusable ({e}); "
+                      f"checking only the latest closed bar for an exit")
+                if bool(result["signal_exit"].tail(1).fillna(0).astype(bool).any()):
                     action = "sell"
                     confidence = 0.9
         else:
