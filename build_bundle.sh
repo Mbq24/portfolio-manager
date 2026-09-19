@@ -11,6 +11,11 @@ set -euo pipefail
 FORGE="${FORGE_ROOT:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/VisualStudioProjects/Forge}"
 VENDOR="$(cd "$(dirname "$0")" && pwd)/vendor/forge"
 
+# Start clean: without this the bundle ACCUMULATES files deleted upstream. A
+# renamed strategy YAML lingered in the image and still appeared in the DSL list
+# (2026-09-19: daily-trend-3of4.yaml survived its rename to
+# daily-trend-expansion-3of4.yaml). The bundle must mirror the repo exactly.
+rm -rf "$VENDOR"
 mkdir -p "$VENDOR/dsl" "$VENDOR/generators" "$VENDOR/tradingview" "$VENDOR/examples"
 
 # DSL package (schema / indicators / conditions)
