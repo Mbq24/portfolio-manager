@@ -3,9 +3,14 @@
 Portfolio Manager — main loop.
 
 Routes trades through Alpaca broker (paper or live). The WHAT (strategy,
-instrument, timeframe) comes from config.json; CLI flags override for
+instruments, timeframe) comes from config.json; CLI flags override for
 one-off runs. Every cycle appends to the permanent audit journal and
 pushes a state snapshot to Forge for the control-room visual.
+
+Multi-instrument: every enabled entry in `cfg["instruments"]` is evaluated in
+the same cycle against ONE shared PortfolioState. Positions are always resolved
+by `asset`, never by index or "the first position" — an exit signal for one
+instrument must never touch another instrument's position.
 
 Usage:
     python run.py                      # one cycle from config.json
@@ -26,11 +31,13 @@ import urllib.request
 from portfolio.state import PortfolioState
 from portfolio.signal_ingest import latest_signal
 from portfolio.strategy import load_strategy, compute_signal
-from portfolio.executor import execute_trade
+from portfolio.executor import execute_trade, size_for_budget
+from portfolio.allocation import book_snapshot, can_enter
 from portfolio.reporter import generate_report, save_report
 from portfolio.prices import PriceFeed
 from portfolio.broker import AlpacaBroker
-from portfolio.config import load as load_config, describe as describe_config, sync_from_forge
+from portfolio.config import (load as load_config, describe as describe_config,
+                              sync_from_forge, enabled_instruments, normalize)
 from portfolio.journal import append as journal_append, read_trades, read_equity
 
 
@@ -40,10 +47,13 @@ def push_to_forge(cfg: dict, pf: PortfolioState, strategy_name: str, source: str
         return
     url = cfg["forge_url"].rstrip("/") + "/api/portfolio/state"
     payload = {
-        "config": {k: cfg.get(k) for k in ("strategy", "ticker", "interval", "period", "asset", "mode")},
+        "config": {k: cfg.get(k) for k in ("mode", "max_total_exposure_pct",
+                                           "max_class_exposure_pct")},
+        "instruments": enabled_instruments(cfg),
         "strategy_name": strategy_name,
         "source": source,
-        "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "updated_at": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).isoformat(),
         "portfolio": pf.to_dict(),
         "trades": read_trades(200),
         "equity_curve": read_equity(1000),
@@ -59,6 +69,129 @@ def push_to_forge(cfg: dict, pf: PortfolioState, strategy_name: str, source: str
             print(f"  [forge] state pushed → {url} ({resp.status})")
     except Exception as e:
         print(f"  [forge] push failed: {e}")
+
+
+def evaluate_instrument(inst: dict, cfg: dict, pf: PortfolioState, prices: dict,
+                        asset_classes: dict):
+    """Run one instrument's signal → decision → execution. Returns (acted, strategy_name, source).
+
+    Never raises on a per-instrument failure: one dead ticker must not stop the other
+    instruments in the same cycle.
+    """
+    inst_cfg = {**cfg, **inst}
+    asset = inst_cfg["asset"]
+    ticker = inst_cfg["ticker"]
+    strategy_name = ""
+    source = ""
+
+    pos = next((p for p in pf.positions if p.asset == asset), None)
+    in_position = pos is not None
+
+    print(f"  ── {ticker} ({asset}) class={inst_cfg.get('asset_class') or '-'}"
+          f"{'  [IN POSITION]' if in_position else ''}")
+
+    try:
+        strategy = load_strategy(inst_cfg["strategy"])
+        strategy_name = strategy.name
+        source = f"forge:{strategy.name}"
+        signal = compute_signal(
+            strategy, ticker, inst_cfg["interval"], inst_cfg["period"], asset,
+            exit_lookback_bars=int(cfg.get("exit_lookback_bars", 6)) if in_position else 0,
+            entry_time=pos.entry_time if in_position else "",
+        )
+    except Exception as e:
+        print(f"     strategy failed: {e}")
+        return False, strategy_name, source
+
+    if signal is None:
+        print("     no signal available — holding")
+        return False, strategy_name, source
+
+    price = prices.get(ticker, 0)
+    if price > 0:
+        signal["price"] = price
+    print(f"     signal: {signal['action'].upper()} @ ${signal['price']:.2f} "
+          f"(conf {signal['confidence']:.1%})")
+
+    meta = {"strategy": strategy_name, "ticker": ticker,
+            "interval": inst_cfg["interval"], "source": source}
+
+    if signal["action"] == "hold":
+        print(f"     {strategy_name} says HOLD")
+        return False, strategy_name, source
+
+    # ---------------------------------------------------------------- BUY
+    if signal["action"] == "buy":
+        if in_position:
+            print(f"     already long {asset} — holding")
+            return False, strategy_name, source
+
+        budget = pf.equity * float(inst_cfg["risk_pct"]) / 100.0
+        book = book_snapshot(pf, asset_classes)
+        ok, why = can_enter(book, asset, inst_cfg.get("asset_class", ""), budget,
+                            cfg["max_total_exposure_pct"], cfg["max_class_exposure_pct"])
+        if not ok:
+            print(f"     BLOCKED entry: {why}")
+            return False, strategy_name, source
+
+        if cfg["mode"] == "paper":
+            size = size_for_budget(signal["price"], budget, available_cash=pf.cash)
+            if size <= 0:
+                print("     sized to zero — no action")
+                return False, strategy_name, source
+            execution = execute_trade("buy", signal["price"], size=size)
+            pf.enter_position(asset, execution["side"], execution["size"],
+                              execution["fill_price"], meta=meta)
+            print(f"     [PAPER] ENTERED {asset} {execution['side']} "
+                  f"{execution['size']:.6f} @ ${execution['fill_price']:.2f} "
+                  f"(budget ${budget:.2f}, cost ${execution['cost']:.2f})")
+            return True, strategy_name, source
+
+        order, err = alpaca_buy(broker=None, price=signal["price"], notional=budget, asset=asset)
+        if err or not order:
+            print(f"     Alpaca order failed: {err or 'no order returned'}")
+            return False, strategy_name, source
+        fill_price = float(order.get("filled_avg_price") or signal["price"])
+        filled_qty = int(float(order.get("filled_qty") or order.get("qty", 0)))
+        if filled_qty > 0:
+            pf.enter_position(asset, "long", filled_qty, fill_price, meta=meta)
+            print(f"     [ALPACA] ENTERED {asset} long {filled_qty} @ ${fill_price:.2f}")
+            return True, strategy_name, source
+        print(f"     order placed, not yet filled ({str(order.get('id', '?'))[:8]})")
+        return False, strategy_name, source
+
+    # --------------------------------------------------------------- SELL
+    if signal["action"] == "sell":
+        if not in_position:
+            print(f"     no {asset} position to exit")
+            return False, strategy_name, source
+
+        # Sanity guard: refuse to exit at a price absurdly far from entry. A >30% move in one
+        # cycle is not a real market move — it means the price feed is contaminated (synthetic
+        # fallback, bad ticker, stale data). Exit on garbage prices books fake P&L.
+        if pos.entry_price > 0:
+            deviation = abs(signal["price"] - pos.entry_price) / pos.entry_price
+            if deviation > 0.30:
+                print(f"     ⚠ SANITY GUARD: ${signal['price']:.2f} is {deviation:.1%} from "
+                      f"entry ${pos.entry_price:.2f} — refusing exit (contaminated feed?)")
+                return False, strategy_name, source
+
+        if cfg["mode"] == "paper":
+            pnl = pf.exit_position(asset, signal["price"], meta=meta)
+            tag = "PROFIT" if pnl > 0 else "LOSS"
+            print(f"     [PAPER] EXITED {asset} → {tag} ${abs(pnl):.2f}")
+            return True, strategy_name, source
+
+        result, err = alpaca_sell(asset)
+        if err:
+            print(f"     Alpaca close failed: {err}")
+            return False, strategy_name, source
+        pnl = pf.exit_position(asset, signal["price"], meta=meta)
+        tag = "PROFIT" if pnl > 0 else "LOSS"
+        print(f"     [ALPACA] EXITED {asset} → {tag} ${abs(pnl):.2f}")
+        return True, strategy_name, source
+
+    return False, strategy_name, source
 
 
 def main():
@@ -84,18 +217,29 @@ def main():
     parser.add_argument("--risk-pct", type=float, default=None, help="Override position size % (e.g. 2.0 = 2% exposure per trade)")
     args = parser.parse_args()
 
-    # Apply CLI overrides on top of config
-    for key in ("strategy", "ticker", "interval", "period", "asset"):
-        val = getattr(args, key)
-        if val:
-            cfg[key] = val
+    # Apply CLI overrides. With multiple instruments a ticker/asset override only makes sense
+    # for a single-instrument run, so it collapses the book to one instrument.
+    overrides = {k: getattr(args, k) for k in ("strategy", "ticker", "interval", "period", "asset")
+                 if getattr(args, k)}
+    if overrides:
+        if len(enabled_instruments(cfg)) > 1 and ("ticker" in overrides or "asset" in overrides):
+            print("  [config] ticker/asset override given with multiple instruments — "
+                  "running the first instrument only.")
+            first = enabled_instruments(cfg)[0]
+            cfg = normalize({**cfg, "instruments": [{**first, **overrides, "enabled": True}]})
+        else:
+            for k, v in overrides.items():
+                cfg[k] = v
+            cfg = normalize(cfg)
     if args.risk_pct is not None:
         cfg["risk_pct"] = args.risk_pct
+        for i in cfg["instruments"]:
+            i["risk_pct"] = args.risk_pct
     if args.paper:
         cfg["mode"] = "paper"
 
-    ASSET = cfg["asset"]
-    strategy_name = cfg.get("strategy", "")
+    insts = enabled_instruments(cfg)
+    strategy_label = ", ".join(sorted({i["strategy"] for i in insts}))
 
     if args.config:
         print("=" * 60)
@@ -117,7 +261,7 @@ def main():
         print("=" * 60)
         print("  MARKET PRICES")
         print("=" * 60)
-        prices = feed.get_prices(["SPY", "QQQ", ASSET, "C:XAUUSD"])
+        prices = feed.get_prices(sorted({i["ticker"] for i in insts} | {"SPY"}))
         print(feed.summary())
         return
 
@@ -164,183 +308,79 @@ def main():
         print(generate_report(pf))
         return
 
-    # Full cycle: ingest signal → decide → execute → report
+    # Full cycle: for each instrument → ingest signal → decide → execute → report
     mode = cfg["mode"].upper()
     print("=" * 60)
     print(f"  PORTFOLIO MANAGER — RUN CYCLE  [{mode}]")
     print("=" * 60)
     print(describe_config(cfg))
 
-    # Fetch current prices first — the FEED uses the yfinance ticker
-    # (cfg["ticker"], e.g. BTC-USD). cfg["asset"] (e.g. BTCUSD) is the
-    # Alpaca broker symbol and is NOT a valid yfinance ticker.
+    # Fetch prices for every instrument's ticker in one call.
+    tickers = sorted({i["ticker"] for i in insts} | {"SPY"})
     print()
-    print("  Current prices:")
-    prices = feed.get_prices(["SPY", cfg["ticker"]])
+    print(f"  Current prices ({len(tickers)}):")
+    prices = feed.get_prices(tickers)
     print(feed.summary())
     print()
 
-    # Mark existing positions with latest prices
     pf.mark_prices(prices)
-    print(f"  Equity: ${pf.equity:.2f} | Cash: ${pf.cash:.2f}")
+    asset_classes = {i["asset"]: i.get("asset_class", "") for i in insts}
+    book = book_snapshot(pf, asset_classes)
+    print(f"  Equity: ${pf.equity:.2f} | Cash: ${pf.cash:.2f} | "
+          f"Exposure: ${book['total']:.2f} "
+          f"({100.0 * book['total'] / max(pf.equity, 1e-9):.1f}% of equity, "
+          f"cap {cfg['max_total_exposure_pct']}% / class {cfg['max_class_exposure_pct']}%)")
+    by_class = ", ".join(f"{k} ${v:.2f}" for k, v in book["by_class"].items()) or "none"
+    print(f"  By class: {by_class}")
     print()
 
-    # Get signal — from a Forge strategy (config) or the VT pipeline
-    print("  [1/3] Reading signal...")
-    signal = None
+    print(f"  Evaluating {len(insts)} instrument(s)...")
+    acted_on = []
+    names = set()
     source = ""
-    use_forge = bool(cfg.get("strategy"))
-    if use_forge:
-        try:
-            strategy = load_strategy(cfg["strategy"])
-            strategy_name = strategy.name
-            source = f"forge:{strategy.name}"
-            print(f"  Strategy: {strategy.name} ({cfg['ticker']} {cfg['interval']})")
-            # If a position is open, pass its entry time so the exit signal
-            # is checked across ALL bars since entry — a transient exit that
-            # already fired must close the position (yfinance data lags; the
-            # old code only looked at the latest bar and could hold through
-            # an exit that happened hours ago).
-            in_position = any(p.asset == ASSET for p in pf.positions)
-            entry_time = ""
-            if in_position:
-                pos = next(p for p in pf.positions if p.asset == ASSET)
-                entry_time = pos.entry_time
-            exit_lookback = int(cfg.get("exit_lookback_bars", 6)) if in_position else 0
-            signal = compute_signal(strategy, cfg["ticker"], cfg["interval"], cfg["period"],
-                                    ASSET, exit_lookback_bars=exit_lookback,
-                                    entry_time=entry_time)
-        except Exception as e:
-            print(f"  Forge strategy failed: {e}")
-            signal = None
-    else:
-        signal = latest_signal()
-        source = signal.get("source", "vt_pipeline") if signal else ""
-    if signal is None:
-        print("  No signal available. Holding current positions.")
-        journal_append(pf, cfg, strategy_name, source)
-        push_to_forge(cfg, pf, strategy_name, source)
-        print(generate_report(pf))
-        return
+    for inst in insts:
+        acted, sname, src = evaluate_instrument(inst, cfg, pf, prices, asset_classes)
+        if sname:
+            names.add(sname)
+            source = src
+        if acted:
+            acted_on.append(inst["ticker"])
+        print()
 
-    # Use live price from feed — keyed by the yfinance ticker. The strategy's
-    # own computed price (same ticker) is already correct; the feed value is
-    # just the freshest close, applied when available.
-    asset_price = prices.get(cfg["ticker"], 0)
-    if asset_price > 0:
-        signal["price"] = asset_price
-
-    print(f"  Signal: {signal['action']} | Confidence: {signal['confidence']:.1%} | Price: ${signal['price']:.2f}")
-    print()
-
-    # Meta stamped on every trade entry for the audit trail
-    meta = {
-        "strategy": strategy_name,
-        "ticker": cfg.get("ticker", ""),
-        "interval": cfg.get("interval", ""),
-        "source": source,
-    }
-
-    # Step 2: Decide whether to trade
-    print("  [2/3] Evaluating trade...")
-    if signal["action"] == "hold":
-        print(f"  {strategy_name or 'VT'} says HOLD. No action taken.")
-
-    elif signal["action"] == "buy":
-        if any(p.asset == ASSET for p in pf.positions):
-            print(f"  Already in {ASSET} position. Holding.")
-        elif cfg["mode"] == "paper":
-            # Paper execution (fallback / testing)
-            execution = execute_trade("buy", signal["price"], cash=pf.cash,
-                                      risk_pct=float(cfg.get("risk_pct", 1.0)))
-            pf.enter_position(ASSET, execution["side"], execution["size"],
-                              execution["fill_price"], meta=meta)
-            print(f"  [PAPER] ENTERED {ASSET} {execution['side']} "
-                  f"{execution['size']:.4f} @ ${execution['fill_price']:.2f} "
-                  f"(cost ${execution['cost']:.2f})")
-        else:
-            # Alpaca execution
-            order, err = alpaca_buy(broker, signal["price"], pf.cash, ASSET,
-                                    risk_pct=float(cfg.get("risk_pct", 1.0)))
-            if err:
-                print(f"  Alpaca order failed: {err}")
-                print("  No trade placed. Use --paper to test with paper executor.")
-            elif order:
-                fill_price = float(order.get("filled_avg_price") or signal["price"])
-                filled_qty = int(float(order.get("filled_qty") or order.get("qty", 0)))
-                if filled_qty > 0:
-                    pf.enter_position(ASSET, "long", filled_qty, fill_price, meta=meta)
-                    print(f"  [ALPACA] ENTERED {ASSET} long {filled_qty} "
-                          f"@ ${fill_price:.2f} (order: {order.get('id', '?')[:8]})")
-                else:
-                    print(f"  Order placed but not yet filled. "
-                          f"Check Alpaca for order {order.get('id', '?')[:8]}")
-
-    elif signal["action"] == "sell":
-        if not any(p.asset == ASSET for p in pf.positions):
-            print(f"  No {ASSET} position to exit.")
-        else:
-            pos = next(p for p in pf.positions if p.asset == ASSET)
-            # Sanity guard: refuse to exit at a price absurdly far from the
-            # entry. A >30% move in one cycle is not a real market move — it
-            # means the price feed is contaminated (synthetic fallback, bad
-            # ticker, stale data). Exit on garbage prices books fake P&L
-            # (Aug 23 2026: exited at synthetic $50,955 vs real $77,345 entry,
-            # fabricating a -$102.92 loss).
-            if pos.entry_price > 0:
-                deviation = abs(signal["price"] - pos.entry_price) / pos.entry_price
-                if deviation > 0.30:
-                    print(f"  ⚠ SANITY GUARD: signal price ${signal['price']:.2f} is "
-                          f"{deviation:.1%} from entry ${pos.entry_price:.2f} — refusing exit "
-                          f"(contaminated price feed?). Holding.")
-                    signal["action"] = "hold"
-            if signal["action"] == "sell" and cfg["mode"] == "paper":
-                # Paper exit
-                pnl = pf.exit_position(ASSET, signal["price"], meta=meta)
-                tag = "PROFIT" if pnl > 0 else "LOSS"
-                print(f"  [PAPER] EXITED {ASSET} → {tag} ${abs(pnl):.2f}")
-            elif signal["action"] == "sell":
-                # Alpaca exit
-                result, err = alpaca_sell(broker, ASSET)
-                if err:
-                    print(f"  Alpaca close failed: {err}")
-                else:
-                    exit_price = signal["price"]
-                    pnl = pf.exit_position(ASSET, exit_price, meta=meta)
-                    tag = "PROFIT" if pnl > 0 else "LOSS"
-                    print(f"  [ALPACA] EXITED {ASSET} → {tag} ${abs(pnl):.2f}")
-    print()
-
-    # Step 3: Report + audit trail + Forge sync
-    print("  [3/3] Generating report...")
+    # Report + audit trail + Forge sync (once per cycle, not once per instrument)
+    print("  Generating report...")
     report = generate_report(pf)
     pf.save()
     save_report(report)
-    journal_append(pf, cfg, strategy_name, source)
-    push_to_forge(cfg, pf, strategy_name, source)
+    journal_append(pf, cfg, strategy_label, source)
+    push_to_forge(cfg, pf, ", ".join(sorted(names)), source)
     print()
     print(report)
+    if acted_on:
+        print(f"\n  Trades executed this cycle: {', '.join(acted_on)}")
+    else:
+        print("\n  No trades executed this cycle.")
 
 
-def alpaca_buy(broker, price, cash, asset, risk_pct=1.0):
-    """Place a buy order through Alpaca. Returns (order, error).
+def alpaca_buy(broker=None, price=0.0, notional=0.0, asset=""):
+    """Place a notional (dollar-amount) buy order. Returns (order, error).
 
-    Uses a notional (dollar-amount) order so high-priced assets like BTC
-    size exactly — a whole-share qty would round $100 risk up to 1 BTC
-    (~$65k) and blow the account.
+    Notional rather than whole-share qty, so high-priced assets like BTC size exactly — a
+    whole-share qty would round a $100 risk up to 1 BTC (~$65k) and blow the account.
     """
-    risk_amount = round(cash * risk_pct / 100.0, 2)  # risk_pct% of cash
-    print(f"  Alpaca: buying ${risk_amount:.2f} of {asset} @ market (${price:.2f})")
-    order = broker.market_order(asset, side="buy", notional=risk_amount)
-    if "error" in order:
+    b = broker or AlpacaBroker(paper=True)
+    print(f"  Alpaca: buying ${notional:.2f} of {asset} @ market (${price:.2f})")
+    order = b.market_order(asset, side="buy", notional=round(notional, 2))
+    if isinstance(order, dict) and "error" in order:
         return None, order["error"]
     return order, None
 
 
-def alpaca_sell(broker, asset):
+def alpaca_sell(asset):
     """Close a position through Alpaca. Returns (result, error)."""
     print(f"  Alpaca: closing {asset} position")
-    result = broker.close_position(asset)
+    b = AlpacaBroker(paper=True)
+    result = b.close_position(asset)
     if isinstance(result, dict) and "error" in result:
         return None, result["error"]
     return result, None

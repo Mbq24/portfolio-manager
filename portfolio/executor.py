@@ -37,6 +37,27 @@ def calculate_commission(size: float) -> float:
     return round(max(COMMISSION_PER_LOT * lots, 1.0), 2)
 
 
+def size_for_budget(price: float, budget: float,
+                    available_cash: Optional[float] = None) -> float:
+    """Position size (units) for a dollar budget.
+
+    The budget is the basis and cash is only a ceiling. Sizing off cash was a latent bug: with
+    one position cash == equity so it was invisible, but with three instruments the third would
+    be sized off cash already spent by the first two.
+
+    Args:
+        price: fill price per unit.
+        budget: dollars to deploy for this instrument.
+        available_cash: optional ceiling; the result never exceeds what cash can cover.
+    """
+    if price <= 0:
+        raise ValueError("price must be positive")
+    notional = max(0.0, float(budget))
+    if available_cash is not None:
+        notional = min(notional, max(0.0, float(available_cash)))
+    return round(notional / price, 8)
+
+
 def execute_trade(action: str, price: float, size: Optional[float] = None,
                   cash: float = 10_000.0, risk_pct: float = 1.0) -> dict:
     """Simulate a paper trade and return execution details.
