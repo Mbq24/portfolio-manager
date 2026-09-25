@@ -1,0 +1,41 @@
+{
+  "_comment": "SEED ONLY. Copied to data/config.json on first boot of an empty volume. The running config is data/config.json (on the Railway volume); once it exists this file is ignored. Never put the live config here — a deploy replaces the image and would silently revert what the book trades (happened 2026-09-25).",
+  "mode": "paper",
+  "max_total_exposure_pct": 45.0,
+  "max_class_exposure_pct": 30.0,
+  "exit_lookback_bars": 6,
+  "forge_push": true,
+  "forge_url": "https://forge-production-0c60.up.railway.app",
+  "instruments": [
+    {
+      "strategy": "daily-trend-expansion-3of4.yaml",
+      "ticker": "BTC-USD",
+      "asset": "BTCUSD",
+      "asset_class": "crypto",
+      "interval": "1d",
+      "period": "1y",
+      "risk_pct": 15.0,
+      "enabled": true
+    },
+    {
+      "strategy": "daily-trend-expansion-3of4.yaml",
+      "ticker": "ETH-USD",
+      "asset": "ETHUSD",
+      "asset_class": "crypto",
+      "interval": "1d",
+      "period": "1y",
+      "risk_pct": 15.0,
+      "enabled": true
+    },
+    {
+      "strategy": "daily-trend-expansion-3of4.yaml",
+      "ticker": "GLD",
+      "asset": "GLD",
+      "asset_class": "metals",
+      "interval": "1d",
+      "period": "1y",
+      "risk_pct": 15.0,
+      "enabled": true
+    }
+  ]
+}

@@ -39,6 +39,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request
 
+from portfolio.config import load as effective_config
+
 ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
 CYCLE_INTERVAL_S = int(os.environ.get("PM_CYCLE_INTERVAL_S", "3600"))
@@ -164,11 +166,10 @@ def portfolio_state():
     try:
         import json
         state = json.loads(state_file.read_text())
-        # Attach config for convenience
-        cfg_file = ROOT / "config.json"
-        if cfg_file.exists():
-            import json as _j
-            state["config"] = _j.loads(cfg_file.read_text())
+        # Attach the EFFECTIVE config (normalized) — the same source of truth the loop
+        # uses, read from the volume. Exposing the raw file would hide the
+        # legacy→instruments migration that the probe and digest both key off.
+        state["config"] = effective_config()
         return jsonify(state)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -176,11 +177,8 @@ def portfolio_state():
 
 @app.route("/api/portfolio/config")
 def portfolio_config():
-    cfg_file = ROOT / "config.json"
-    if not cfg_file.exists():
-        return jsonify({"error": "no config"}), 404
-    import json
-    return jsonify(json.loads(cfg_file.read_text()))
+    """The effective config — what the loop will actually run, normalized."""
+    return jsonify(effective_config())
 
 
 @app.route("/api/portfolio/cycle", methods=["POST"])

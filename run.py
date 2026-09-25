@@ -37,12 +37,19 @@ from portfolio.reporter import generate_report, save_report
 from portfolio.prices import PriceFeed
 from portfolio.broker import AlpacaBroker
 from portfolio.config import (load as load_config, describe as describe_config,
-                              sync_from_forge, enabled_instruments, normalize)
+                              sync_from_forge, enabled_instruments, normalize,
+                              HOLD_KEY)
 from portfolio.journal import append as journal_append, read_trades, read_equity
 
 
-def push_to_forge(cfg: dict, pf: PortfolioState, strategy_name: str, source: str):
-    """Push a state snapshot to Forge so the control-room visual stays in sync."""
+def push_to_forge(cfg: dict, pf: PortfolioState, strategy_name: str, source: str,
+                  hold_reason: str = ""):
+    """Push a state snapshot to Forge so the control-room visual stays in sync.
+
+    `hold` marks a cycle where nothing was evaluated because no authoritative config
+    existed. It is pushed explicitly so a held cycle is visible from outside, rather than
+    looking like an ordinary quiet cycle that simply had no signals.
+    """
     if not cfg.get("forge_push"):
         return
     url = cfg["forge_url"].rstrip("/") + "/api/portfolio/state"
@@ -52,6 +59,8 @@ def push_to_forge(cfg: dict, pf: PortfolioState, strategy_name: str, source: str
         "instruments": enabled_instruments(cfg),
         "strategy_name": strategy_name,
         "source": source,
+        "hold": bool(hold_reason),
+        "hold_reason": hold_reason,
         "updated_at": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).isoformat(),
         "portfolio": pf.to_dict(),
@@ -198,8 +207,11 @@ def main():
     cfg = load_config()
 
     # Forge is the control room: pull the desired config from Forge first.
-    # Edits made in the Forge UI are applied here, this cycle.
+    # Edits made in the Forge UI are applied here, this cycle. If Forge has no
+    # authoritative config — wiped by a deploy, or unreachable — sync_from_forge flags a
+    # hold and this cycle evaluates nothing at all.
     cfg = sync_from_forge(cfg)
+    hold_reason = cfg.get(HOLD_KEY) or ""
 
     parser = argparse.ArgumentParser(description="Portfolio Manager")
     parser.add_argument("--summary", action="store_true", help="Show current state only")
@@ -315,6 +327,12 @@ def main():
     print("=" * 60)
     print(describe_config(cfg))
 
+    if hold_reason:
+        print()
+        print(f"  ⚠ HOLDING THIS CYCLE — {hold_reason}")
+        print("     No authoritative config to run, so nothing will be evaluated:")
+        print("     no entries, no exits. State, journal and heartbeat continue.")
+
     # Fetch prices for every instrument's ticker in one call.
     tickers = sorted({i["ticker"] for i in insts} | {"SPY"})
     print()
@@ -334,29 +352,36 @@ def main():
     print(f"  By class: {by_class}")
     print()
 
-    print(f"  Evaluating {len(insts)} instrument(s)...")
     acted_on = []
     names = set()
     source = ""
-    for inst in insts:
-        acted, sname, src = evaluate_instrument(inst, cfg, pf, prices, asset_classes)
-        if sname:
-            names.add(sname)
-            source = src
-        if acted:
-            acted_on.append(inst["ticker"])
-        print()
+    if hold_reason:
+        print("  Not evaluating any instrument (held cycle).")
+    else:
+        print(f"  Evaluating {len(insts)} instrument(s)...")
+        for inst in insts:
+            acted, sname, src = evaluate_instrument(inst, cfg, pf, prices, asset_classes)
+            if sname:
+                names.add(sname)
+                source = src
+            if acted:
+                acted_on.append(inst["ticker"])
+            print()
 
     # Report + audit trail + Forge sync (once per cycle, not once per instrument)
     print("  Generating report...")
     report = generate_report(pf)
     pf.save()
     save_report(report)
-    journal_append(pf, cfg, strategy_label, source)
-    push_to_forge(cfg, pf, ", ".join(sorted(names)), source)
+    journal_append(pf, cfg,
+                   f"HOLD ({hold_reason})" if hold_reason else strategy_label,
+                   source)
+    push_to_forge(cfg, pf, ", ".join(sorted(names)), source, hold_reason=hold_reason)
     print()
     print(report)
-    if acted_on:
+    if hold_reason:
+        print(f"\n  HELD: no trades by design ({hold_reason}).")
+    elif acted_on:
         print(f"\n  Trades executed this cycle: {', '.join(acted_on)}")
     else:
         print("\n  No trades executed this cycle.")

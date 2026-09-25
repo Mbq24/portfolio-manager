@@ -1,6 +1,12 @@
 # Portfolio Manager — deploy-time bundle of Forge modules (gitignored)
 vendor/
 
+# Runtime state and the LIVE config. These belong to the volume, not to git. A committed
+# runtime config is what let a deploy silently change what the book was trading
+# (2026-09-25), so both are excluded from the repository and from the image.
+data/
+config.json
+
 # Python
 __pycache__/
 *.pyc

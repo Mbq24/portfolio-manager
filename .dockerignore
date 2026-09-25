@@ -5,4 +5,7 @@ venv/
 __pycache__/
 *.pyc
 data/
+# The runtime config lives on the volume, never in the image. Excluding it here means a
+# stray local config.json can never be baked in and silently take over what the book trades.
+config.json
 diag_vol_expansion.py
