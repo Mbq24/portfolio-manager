@@ -102,6 +102,23 @@ def test_save_writes_to_the_volume_and_round_trips(tmp_paths):
     assert back["instruments"][2]["risk_pct"] == 15.0
 
 
+def test_underscore_comment_keys_are_stripped_from_the_effective_config(tmp_paths):
+    """The seed file's _comment must not become part of what the loop runs or saves."""
+    runtime, default = tmp_paths
+    default.write_text(json.dumps({
+        "_comment": "seed only — humans read this",
+        "strategy": "daily-trend-expansion-3of4.yaml", "ticker": "GLD", "asset": "GLD",
+        "interval": "1d", "period": "1y", "risk_pct": 5.0}))
+
+    cfg = C.load()
+
+    assert "_comment" not in cfg, "a seed comment leaked into the effective config"
+    assert cfg["instruments"][0]["ticker"] == "GLD"
+
+    C.save(cfg)
+    assert "_comment" not in json.loads(runtime.read_text())
+
+
 def test_transient_hold_flag_is_never_persisted(tmp_paths):
     """A hold is a per-cycle control signal. Persisting it would hold forever."""
     runtime, _ = tmp_paths

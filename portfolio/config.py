@@ -93,6 +93,11 @@ def normalize(cfg: dict) -> dict:
     missing field. Top-level values act as defaults that an individual instrument overrides.
     """
     cfg = dict(cfg)
+    # Keys beginning with "_" are comments/metadata for humans (e.g. the seed file's
+    # "_comment"). They must never reach the effective config, the API response, or the
+    # persisted file.
+    cfg = {k: v for k, v in cfg.items()
+           if not (isinstance(k, str) and k.startswith("_"))}
     shared = {k: cfg[k] for k in INSTRUMENT_KEYS if k in cfg}
     raw = cfg.get("instruments") or []
 
