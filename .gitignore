@@ -1,2 +1,7 @@
 # Portfolio Manager — deploy-time bundle of Forge modules (gitignored)
 vendor/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
