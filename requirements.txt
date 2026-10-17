@@ -5,3 +5,6 @@ yfinance
 pyyaml
 flask
 requests
+# zoneinfo needs the IANA db; the slim base image does not ship it, and the
+# briefing schedule is pinned to US/Eastern (DST-aware) rather than UTC.
+tzdata

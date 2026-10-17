@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # App code
 COPY portfolio/ portfolio/
-COPY run.py config.default.json requirements.txt portfolio_server.py build_bundle.sh ./
+COPY run.py config.default.json requirements.txt portfolio_server.py briefing.py build_bundle.sh ./
 
 # Bundled Forge modules (built on the dev Mac by build_bundle.sh)
 COPY vendor/forge/ vendor/forge/

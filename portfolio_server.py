@@ -12,6 +12,8 @@ Endpoints:
     GET /api/portfolio/state       full state + config + recent trades
     GET /api/portfolio/config      effective config
     POST /api/portfolio/cycle      trigger a cycle now (optional token)
+    GET /api/briefing/preview      render the daily briefing without sending it
+    POST /api/briefing/send        send the daily briefing now (optional token)
 
 The cycle itself is run.py — the SAME code the launchd hook ran locally. The
 server just schedules it and serves the results. State/journal persist under
@@ -146,6 +148,19 @@ def health():
         last = _last_cycle_at
         ok = _last_cycle_ok
         count = _cycle_count
+    # Briefing status is part of host health: if it stops posting, the daily
+    # update is missing even though the trading loop looks fine.
+    briefing: dict = {"enabled": os.environ.get("PM_BRIEFING_ENABLED", "1") == "1"}
+    try:
+        from briefing import briefing_hour_minute, _sent_marker, next_run_delay
+        h, m = briefing_hour_minute()
+        briefing.update({
+            "at": f"{h:02d}:{m:02d} US/Eastern",
+            "next_in_min": round(next_run_delay() / 60, 1),
+            "last_sent": _sent_marker() or None,
+        })
+    except Exception as e:
+        briefing["error"] = f"{type(e).__name__}: {e}"
     return jsonify({
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
@@ -155,6 +170,7 @@ def health():
             "cycle_count": count,
             "next_cycle_in_min": round(_next_run_delay() / 60, 1),
         },
+        "briefing": briefing,
     })
 
 
@@ -204,8 +220,42 @@ def trigger_cycle():
     return jsonify({"status": "cycle started"})
 
 
+@app.route("/api/briefing/preview")
+def briefing_preview():
+    """Render the daily briefing exactly as it would be sent, without sending.
+
+    persist=False is the important detail: previewing must not consume the
+    delta baseline (cycle/equity/condition snapshots) that the next real
+    report is compared against.
+    """
+    from briefing import already_sent_today, build_digest
+    text, meta = build_digest(persist=False)
+    return jsonify({"text": text, "meta": meta, "sent_today": already_sent_today()})
+
+
+@app.route("/api/briefing/send", methods=["POST"])
+def briefing_send():
+    if CYCLE_TOKEN:
+        token = request.headers.get("X-Cycle-Token", "")
+        if token != CYCLE_TOKEN:
+            return jsonify({"error": "bad token"}), 401
+    from briefing import send_briefing
+    # force defaults to on for a manual send: asking for it is explicit intent.
+    force = request.args.get("force", "1") != "0"
+    return jsonify(send_briefing(force=force, reason="http"))
+
+
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=scheduler_loop, daemon=True).start()
+    # The briefing scheduler lives in the same always-on container as the trading
+    # loop, which is the whole point: it no longer depends on a machine that sleeps.
+    if os.environ.get("PM_BRIEFING_ENABLED", "1") == "1":
+        try:
+            from briefing import scheduler_loop as briefing_scheduler_loop
+            threading.Thread(target=briefing_scheduler_loop, daemon=True).start()
+            _log("Briefing scheduler thread started")
+        except Exception as e:
+            _log(f"Briefing scheduler FAILED to start: {e}")
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, threaded=True)
