@@ -11,3 +11,11 @@ config.json
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
+venv/
+
+# Local research cache and gate output. The price cache is a speed-up, not data of
+# record — a stale committed pickle would silently outlive the vendor series it copies.
+.data_cache/
+multi_instrument_gate.json
+wide_universe_gate.json
