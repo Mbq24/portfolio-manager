@@ -86,6 +86,42 @@ def briefing_hour_minute():
     return h, m
 
 
+# ── boolean env parsing ─────────────────────────────────────────────────────
+#
+# These flags used to be tested as `os.environ.get(NAME, "1") == "1"`. That is
+# exact-but-hostile: setting PM_BRIEFING_ENABLED=true — the obvious spelling, and
+# what Railway's dashboard suggests — left the briefing silently and permanently
+# disabled, with no error anywhere. The dashboard showed the variable as set; the
+# code disagreed; /health said enabled:false; nothing logged a complaint. It cost
+# a full debugging cycle to find a difference of one string.
+#
+# Accept the spellings people actually type. Unparseable values are logged loudly
+# and treated as ON (the default), because a feature silently switching itself off
+# is the failure mode that hurts: a noisy-but-running briefing beats a silent one.
+
+_TRUTHY = {"1", "true", "t", "yes", "y", "on", "enabled"}
+_FALSY = {"0", "false", "f", "no", "n", "off", "disabled"}
+
+
+def env_flag(name: str, default: bool = True) -> bool:
+    """Lenient boolean env var. Missing => default."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    val = str(raw).strip().lower()
+    if val in _TRUTHY:
+        return True
+    if val in _FALSY:
+        return False
+    _log(f"{name}={raw!r} is not a recognised boolean — treating as {default}")
+    return default
+
+
+def briefing_enabled() -> bool:
+    """Is the daily briefing scheduler supposed to be running?"""
+    return env_flag("PM_BRIEFING_ENABLED", True)
+
+
 def next_run_delay() -> float:
     """Seconds until the next scheduled briefing (default 08:00 US/Eastern)."""
     h, m = briefing_hour_minute()
@@ -602,7 +638,7 @@ def scheduler_loop():
     h, m = briefing_hour_minute()
     _log(f"briefing scheduler started (daily at {h:02d}:{m:02d} US/Eastern)")
     # Catch-up: a redeploy after the scheduled time must not skip the day.
-    if os.environ.get("PM_BRIEFING_ENABLED", "1") == "1" and not already_sent_today():
+    if briefing_enabled() and not already_sent_today():
         _log("catch-up check: nothing sent today, sending now")
         send_briefing(reason="startup-catchup")
     while True:
@@ -610,7 +646,7 @@ def scheduler_loop():
             delay = next_run_delay()
             _log(f"next briefing in {delay / 3600:.2f}h")
             time.sleep(delay)
-            if os.environ.get("PM_BRIEFING_ENABLED", "1") == "1":
+            if briefing_enabled():
                 send_briefing(reason="scheduled")
         except Exception as e:
             _log(f"scheduler error: {type(e).__name__}: {e} - continuing")

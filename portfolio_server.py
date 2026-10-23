@@ -150,17 +150,21 @@ def health():
         count = _cycle_count
     # Briefing status is part of host health: if it stops posting, the daily
     # update is missing even though the trading loop looks fine.
-    briefing: dict = {"enabled": os.environ.get("PM_BRIEFING_ENABLED", "1") == "1"}
+    briefing: dict = {}
     try:
-        from briefing import briefing_hour_minute, _sent_marker, next_run_delay
+        from briefing import (briefing_hour_minute, _sent_marker, next_run_delay,
+                              briefing_enabled)
         h, m = briefing_hour_minute()
         briefing.update({
+            "enabled": briefing_enabled(),
             "at": f"{h:02d}:{m:02d} US/Eastern",
             "next_in_min": round(next_run_delay() / 60, 1),
             "last_sent": _sent_marker() or None,
         })
     except Exception as e:
-        briefing["error"] = f"{type(e).__name__}: {e}"
+        # briefing failed to import: it cannot run, so report disabled rather than
+        # claiming health we don't have.
+        briefing = {"enabled": False, "error": f"{type(e).__name__}: {e}"}
     return jsonify({
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
@@ -250,12 +254,20 @@ if __name__ == "__main__":
     threading.Thread(target=scheduler_loop, daemon=True).start()
     # The briefing scheduler lives in the same always-on container as the trading
     # loop, which is the whole point: it no longer depends on a machine that sleeps.
-    if os.environ.get("PM_BRIEFING_ENABLED", "1") == "1":
-        try:
-            from briefing import scheduler_loop as briefing_scheduler_loop
+    # Log BOTH outcomes. Previously the disabled case printed nothing, so a briefing
+    # that had never been switched on looked identical to one that was running
+    # normally — the absence of a log line was the only clue, and nobody looks for
+    # the absence of a line.
+    try:
+        from briefing import (scheduler_loop as briefing_scheduler_loop,
+                              briefing_enabled)
+        if briefing_enabled():
             threading.Thread(target=briefing_scheduler_loop, daemon=True).start()
             _log("Briefing scheduler thread started")
-        except Exception as e:
-            _log(f"Briefing scheduler FAILED to start: {e}")
+        else:
+            _log("Briefing scheduler DISABLED (PM_BRIEFING_ENABLED is off) — "
+                 "no daily briefing will be sent")
+    except Exception as e:
+        _log(f"Briefing scheduler FAILED to start: {e}")
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, threaded=True)
