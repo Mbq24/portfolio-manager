@@ -171,6 +171,30 @@ def drop_forming(df):
     return df
 
 
+def scrub_bars(df, ticker=""):
+    """Drop unusable bars and SAY SO — never silently.
+
+    A vendor can return a settled-looking row with a null close. Observed 2026-10-26: SPY, QQQ
+    and IWM each carried a final row for that date with open/high/low/close ALL NaN. `drop_forming`
+    only removes TODAY's forming bar, so a null row dated yesterday-or-today survived, and one NaN
+    close silently turned every downstream metric (return, drawdown, buy-and-hold) into NaN — the
+    run then looks like a result instead of a data gap. That is the same failure class as the
+    silenced `TypeError` and the probe that reported ok:true from a fallback: the broken state
+    must not be indistinguishable from a working one.
+
+    Never forward-fill the missing close. Fabricating a bar is worse than rejecting one.
+    """
+    if df is None or "close" not in df.columns:
+        return df
+    bad = df["close"].isna() | (df["close"] <= 0)
+    n = int(bad.sum())
+    if n:
+        when = ", ".join(str(d)[:10] for d in list(df.index[bad])[:5])
+        print("  WARNING %s: dropped %d unusable bar(s) with null/zero close: %s"
+              % (ticker or "?", n, when))
+    return df[~bad]
+
+
 def load(ticker, window="5y", cache_dir=None, ttl_hours=20.0):
     """Fetch daily bars with an on-disk cache.
 
@@ -181,12 +205,14 @@ def load(ticker, window="5y", cache_dir=None, ttl_hours=20.0):
     p = (cache / ("%s_%s_1d.pkl" % (ticker.replace("=", "_").replace("/", "_"), window))
          if cache is not None else None)
     if p is not None and p.exists() and (time.time() - p.stat().st_mtime) < ttl_hours * 3600:
-        return pd.read_pickle(p)
+        # Scrub on READ as well as on write: a cache written before this guard existed, or by an
+        # older caller, may already contain null-close rows.
+        return scrub_bars(pd.read_pickle(p), ticker)
     df = forge_modules()["fetch_ohlcv"](ticker, interval="1d", period=window,
                                         allow_synthetic=False)
     if df is None or len(df) < 250:
         raise RuntimeError("insufficient bars: %s" % (0 if df is None else len(df)))
-    df = drop_forming(df)
+    df = scrub_bars(drop_forming(df), ticker)
     if cache is not None and p is not None:
         cache.mkdir(exist_ok=True)
         df.to_pickle(p)
