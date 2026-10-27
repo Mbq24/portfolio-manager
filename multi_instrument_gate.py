@@ -232,8 +232,16 @@ class Result:
 
 
 def analyse(dsl, ticker, group, tradable=True, cost_bps=10.0, window="5y",
-            holdout_frac=1.0 / 3.0, cache_dir=None):
-    df = load(ticker, window=window, cache_dir=cache_dir)
+            holdout_frac=1.0 / 3.0, cache_dir=None, df=None):
+    """Measure one instrument against one DSL.
+
+    `df` lets a caller supply an already-fetched frame (e.g. 4h bars from a venue the default
+    feeder cannot reach). Additive on purpose: experiments must reuse THIS measurement code
+    rather than reimplement it, or two backtest paths will eventually disagree and the
+    disagreement becomes the finding instead of the strategy.
+    """
+    if df is None:
+        df = load(ticker, window=window, cache_dir=cache_dir)
     fm = forge_modules()
     ind = fm["compute_indicators"](df.copy(), dsl)
     if "signal_entry" not in ind.columns:
